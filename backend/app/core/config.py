@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "ChatApp"
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
-    APP_PORT: int = 8000
+    APP_PORT: int = 8001
     DEBUG: bool = False
 
     # MongoDB
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # File Upload
     MAX_FILE_SIZE_MB: int = 10
