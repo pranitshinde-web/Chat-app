@@ -1,6 +1,7 @@
 from app.schemas.user import UserCreate, UserResponse, UserLogin, UserUpdate
 from app.schemas.auth import Token, AuthResponse
 from app.schemas.common import ErrorResponse, HTTPValidationError
+from app.schemas.room import RoomCreate, RoomUpdate, RoomResponse
 
 __all__ = [
     "UserCreate",
@@ -11,5 +12,8 @@ __all__ = [
     "AuthResponse",
     "ErrorResponse",
     "HTTPValidationError",
+    "RoomCreate",
+    "RoomUpdate",
+    "RoomResponse",
 ]
 

@@ -13,17 +13,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-@router.post(
-    "/register",
-    response_model=AuthResponse,
-    status_code=status.HTTP_201_CREATED,
-    responses={
-        201: {"model": AuthResponse, "description": "User successfully registered"},
-        400: {"model": ErrorResponse, "description": "Bad request (e.g., email already exists)"},
-        422: {"model": HTTPValidationError, "description": "Validation error"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
+@router.post("/register")
 async def register(
     user_in: UserCreate,
     db: AsyncIOMotorDatabase = Depends(get_database)
@@ -44,17 +34,7 @@ async def register(
         )
 
 
-@router.post(
-    "/login",
-    response_model=AuthResponse,
-    responses={
-        200: {"model": AuthResponse, "description": "Successfully logged in"},
-        401: {"model": ErrorResponse, "description": "Invalid credentials"},
-        403: {"model": ErrorResponse, "description": "Account inactive"},
-        422: {"model": HTTPValidationError, "description": "Validation error"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
+@router.post("/login")
 async def login(
     login_data: UserLogin,
     db: AsyncIOMotorDatabase = Depends(get_database)
@@ -75,15 +55,7 @@ async def login(
         )
 
 
-@router.post(
-    "/refresh",
-    response_model=Token,
-    responses={
-        200: {"model": Token, "description": "Tokens successfully refreshed"},
-        401: {"model": ErrorResponse, "description": "Invalid or expired refresh token"},
-        500: {"model": ErrorResponse, "description": "Internal server error"},
-    },
-)
+@router.post("/refresh")
 async def refresh_token(
     refresh_data: TokenRefreshRequest,
     db: AsyncIOMotorDatabase = Depends(get_database)
