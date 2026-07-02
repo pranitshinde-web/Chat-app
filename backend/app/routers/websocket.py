@@ -11,26 +11,107 @@ from app.services.connection_manager import manager
 from app.models.user import User
 from app.schemas.websocket import WSEvent, WSEventType
 from app.core.redis_client import set_value, delete_key, add_to_set, remove_from_set
+from app.models.message import Message, MessageType
+from app.services.message_repository import MessageRepository
+from app.schemas.message import MessageResponse
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["WebSockets"])
 
 
-# ─── WebSocket Event Handlers (Stubs) ─────────────────────────────────────────
+# ─── WebSocket Event Handlers ─────────────────────────────────────────────────
 
 async def handle_message_send(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
     logger.info(f"Routing to handle_message_send for user {user_id} in room {event.room_id}")
-    # Echo back message.new confirming receipt
-    confirm_event = WSEvent(
+    
+    # 1. Validate sender is a room member
+    room_repo = RoomRepository(db)
+    room = await room_repo.find_by_id(event.room_id)
+    if not room:
+        error_event = WSEvent(
+            event=WSEventType.ERROR,
+            payload={"detail": f"Room {event.room_id} not found"},
+            room_id=event.room_id
+        )
+        await websocket.send_json(error_event.model_dump(mode="json"))
+        return
+        
+    user_oid = ObjectId(user_id)
+    if user_oid not in room.get("members", []):
+        logger.warning(f"Message send rejected: User {user_id} is not a member of room {event.room_id}")
+        error_event = WSEvent(
+            event=WSEventType.ERROR,
+            payload={"detail": f"Forbidden: You are not a member of room {event.room_id}"},
+            room_id=event.room_id
+        )
+        await websocket.send_json(error_event.model_dump(mode="json"))
+        return
+
+    # 2. Persist message to MongoDB
+    content = event.payload.get("content") or event.payload.get("text")
+    msg_type_str = event.payload.get("message_type", "text")
+    try:
+        msg_type = MessageType(msg_type_str)
+    except ValueError:
+        msg_type = MessageType.TEXT
+        
+    file_url = event.payload.get("file_url")
+    
+    message_doc = Message(
+        room_id=ObjectId(event.room_id),
+        sender_id=user_oid,
+        content=content,
+        message_type=msg_type,
+        file_url=file_url
+    )
+    
+    # Construct database document using native ObjectIds
+    db_doc = {
+        "room_id": message_doc.room_id,
+        "sender_id": message_doc.sender_id,
+        "content": message_doc.content,
+        "message_type": message_doc.message_type.value,
+        "file_url": message_doc.file_url,
+        "read_by": message_doc.read_by,
+        "is_deleted": message_doc.is_deleted
+    }
+    if message_doc.id:
+        db_doc["_id"] = message_doc.id
+
+    message_repo = MessageRepository(db)
+    inserted_id = await message_repo.insert_one(db_doc)
+    
+    # Retrieve the inserted message to get full database state with timestamps
+    inserted_msg = await message_repo.find_by_id(inserted_id)
+    if not inserted_msg:
+        logger.error(f"Failed to retrieve inserted message {inserted_id} from MongoDB")
+        error_event = WSEvent(
+            event=WSEventType.ERROR,
+            payload={"detail": "Internal server error: failed to save message"},
+            room_id=event.room_id
+        )
+        await websocket.send_json(error_event.model_dump(mode="json"))
+        return
+
+    # 3. Broadcast message.new event to all connected room members
+    msg_response = MessageResponse(**inserted_msg)
+    new_event = WSEvent(
         event=WSEventType.MESSAGE_NEW,
+        payload=msg_response.model_dump(mode="json"),
+        room_id=event.room_id
+    )
+    await manager.broadcast_to_room(new_event.model_dump(mode="json"), event.room_id)
+
+    # 4. Return message.sent acknowledgement to sender
+    sent_event = WSEvent(
+        event=WSEventType.MESSAGE_SENT,
         payload={
-            "text": event.payload.get("text"),
-            "sender_id": user_id,
-            "status": "received_by_server"
+            "message_id": inserted_id,
+            "status": "sent"
         },
         room_id=event.room_id
     )
-    await websocket.send_json(confirm_event.model_dump(mode="json"))
+    await websocket.send_json(sent_event.model_dump(mode="json"))
 
 
 async def handle_typing_start(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):

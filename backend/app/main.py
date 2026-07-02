@@ -6,7 +6,7 @@ from app.core.config import settings
 from app.core.logging_config import setup_logging, get_logger
 from app.core.database import connect_to_mongo, disconnect_from_mongo
 from app.core.redis_client import connect_to_redis, disconnect_from_redis
-from app.routers import auth, users, rooms, websocket
+from app.routers import auth, users, rooms, websocket, messages
 
 setup_logging()
 logger = get_logger(__name__)
@@ -38,6 +38,7 @@ app = FastAPI(
 app.include_router(auth.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(rooms.router, prefix="/api")
+app.include_router(messages.router, prefix="/api")
 app.include_router(websocket.router)
 
 app.add_middleware(

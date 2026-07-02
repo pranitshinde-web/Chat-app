@@ -7,6 +7,9 @@ from pydantic import BaseModel, Field, ConfigDict
 class WSEventType(str, Enum):
     MESSAGE_SEND = "message.send"
     MESSAGE_NEW = "message.new"
+    MESSAGE_SENT = "message.sent"
+    MESSAGE_UPDATED = "message.updated"
+    MESSAGE_DELETED = "message.deleted"
     TYPING_START = "typing.start"
     TYPING_STOP = "typing.stop"
     PRESENCE_JOIN = "presence.join"

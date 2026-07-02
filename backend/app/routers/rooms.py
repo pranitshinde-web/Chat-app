@@ -1,6 +1,7 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, status, HTTPException
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from bson import ObjectId
 
 from app.core.database import get_database
 from app.core.logging_config import get_logger
@@ -8,6 +9,7 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.schemas.room import RoomCreate, RoomResponse, RoomUpdate
 from app.schemas.common import ErrorResponse, HTTPValidationError
+from app.schemas.message import MessageResponse
 from app.services.room_service import RoomService
 
 logger = get_logger(__name__)
@@ -190,3 +192,62 @@ async def update_room(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An unexpected error occurred while updating the room details",
         )
+
+
+@router.get(
+    "/{room_id}/messages",
+    response_model=List[MessageResponse]
+)
+async def get_room_messages(
+    room_id: str,
+    limit: int = 50,
+    before: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Get paginated message history for a room, sorted by created_at descending.
+    Only accessible to room members.
+    Supports cursor-based pagination using before (message_id).
+    """
+    if not ObjectId.is_valid(room_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid room ID format."
+        )
+    
+    # Check if room exists and user is a member
+    from app.services.room_repository import RoomRepository
+    room_repo = RoomRepository(db)
+    room = await room_repo.find_by_id(room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Room not found."
+        )
+    
+    user_oid = ObjectId(current_user.id)
+    if user_oid not in room.get("members", []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You are not a member of this room."
+        )
+        
+    query = {"room_id": ObjectId(room_id)}
+    if before:
+        if not ObjectId.is_valid(before):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid before cursor ID format."
+            )
+        query["_id"] = {"$lt": ObjectId(before)}
+        
+    from app.services.message_repository import MessageRepository
+    msg_repo = MessageRepository(db)
+    messages = await msg_repo.find_many(
+        filter=query,
+        sort=[("_id", -1)],
+        limit=limit
+    )
+    
+    return [MessageResponse(**msg) for msg in messages]

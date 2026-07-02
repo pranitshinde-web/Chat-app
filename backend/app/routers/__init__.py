@@ -1,3 +1,3 @@
-from app.routers import auth, users, rooms, websocket
+from app.routers import auth, users, rooms, websocket, messages
 
-__all__ = ["auth", "users", "rooms", "websocket"]
+__all__ = ["auth", "users", "rooms", "websocket", "messages"]
