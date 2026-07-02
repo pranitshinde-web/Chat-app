@@ -11,6 +11,10 @@ from app.schemas.room import RoomCreate, RoomResponse, RoomUpdate
 from app.schemas.common import ErrorResponse, HTTPValidationError
 from app.schemas.message import MessageResponse
 from app.services.room_service import RoomService
+from app.core.redis_client import get_set_members
+from app.services.room_repository import RoomRepository
+from app.services.user_repository import UserRepository
+from app.services.message_repository import MessageRepository
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/rooms", tags=["Rooms"])
@@ -195,6 +199,64 @@ async def update_room(
 
 
 @router.get(
+    "/{room_id}/presence",
+    response_model=List[dict],
+    summary="Get online members in a room"
+)
+async def get_room_presence(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Returns a list of currently online members in a room.
+    Each entry contains user_id and username.
+    Only accessible to room members.
+    """
+    if not ObjectId.is_valid(room_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid room ID format."
+        )
+
+    room_repo = RoomRepository(db)
+    room = await room_repo.find_by_id(room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Room not found."
+        )
+
+    user_oid = ObjectId(current_user.id)
+    if user_oid not in room.get("members", []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You are not a member of this room."
+        )
+
+    # Retrieve all user IDs currently marked online in this room
+    online_user_ids = await get_set_members(f"room:{room_id}:online")
+
+    if not online_user_ids:
+        return []
+
+    # Enrich with username from MongoDB (batch lookup)
+    user_repo = UserRepository(db)
+    result = []
+    for uid in online_user_ids:
+        user_dict = await user_repo.find_by_id(uid)
+        if user_dict:
+            result.append({
+                "user_id": uid,
+                "username": user_dict.get("username", uid),
+                "avatar_url": user_dict.get("avatar_url"),
+            })
+        else:
+            result.append({"user_id": uid, "username": uid, "avatar_url": None})
+
+    return result
+
+@router.get(
     "/{room_id}/messages",
     response_model=List[MessageResponse]
 )
@@ -217,7 +279,6 @@ async def get_room_messages(
         )
     
     # Check if room exists and user is a member
-    from app.services.room_repository import RoomRepository
     room_repo = RoomRepository(db)
     room = await room_repo.find_by_id(room_id)
     if not room:
@@ -242,7 +303,6 @@ async def get_room_messages(
             )
         query["_id"] = {"$lt": ObjectId(before)}
         
-    from app.services.message_repository import MessageRepository
     msg_repo = MessageRepository(db)
     messages = await msg_repo.find_many(
         filter=query,

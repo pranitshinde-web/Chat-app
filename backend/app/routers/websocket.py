@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, status
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
@@ -10,13 +11,21 @@ from app.services.room_repository import RoomRepository
 from app.services.connection_manager import manager
 from app.models.user import User
 from app.schemas.websocket import WSEvent, WSEventType
-from app.core.redis_client import set_value, delete_key, add_to_set, remove_from_set
+from app.core.redis_client import (
+    set_with_expiry, delete_key,
+    add_to_set, remove_from_set, refresh_expiry,
+)
 from app.models.message import Message, MessageType
 from app.services.message_repository import MessageRepository
 from app.schemas.message import MessageResponse
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["WebSockets"])
+
+# ── Presence constants ────────────────────────────────────────────────────────
+PRESENCE_TTL = 30        # seconds before a presence key auto-expires
+KEEPALIVE_INTERVAL = 20  # seconds between keepalive refreshes
+TYPING_TTL = 5           # seconds before a typing indicator auto-expires
 
 
 # ─── WebSocket Event Handlers ─────────────────────────────────────────────────
@@ -115,23 +124,46 @@ async def handle_message_send(event: WSEvent, user_id: str, websocket: WebSocket
 
 
 async def handle_typing_start(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
-    logger.info(f"Routing to handle_typing_start for user {user_id} in room {event.room_id}")
-    confirm_event = WSEvent(
+    """Set a Redis TTL key so typing state auto-expires, then broadcast to the room."""
+    logger.info(f"typing.start from user {user_id} in room {event.room_id}")
+
+    # Fetch username for the broadcast payload
+    user_repo = UserRepository(db)
+    user_dict = await user_repo.find_by_id(user_id)
+    username = user_dict.get("username", user_id) if user_dict else user_id
+
+    # Persist typing state in Redis with auto-expiry (handles dropped connections)
+    await set_with_expiry(f"typing:{event.room_id}:{user_id}", "1", TYPING_TTL)
+
+    # Broadcast to every other member currently in the room
+    broadcast_event = WSEvent(
         event=WSEventType.TYPING_START,
-        payload={"user_id": user_id, "status": "typing_started_confirm"},
+        payload={"user_id": user_id, "username": username},
         room_id=event.room_id
     )
-    await websocket.send_json(confirm_event.model_dump(mode="json"))
+    await manager.broadcast_to_room_except(
+        broadcast_event.model_dump(mode="json"), event.room_id, exclude_user_id=user_id
+    )
 
 
 async def handle_typing_stop(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
-    logger.info(f"Routing to handle_typing_stop for user {user_id} in room {event.room_id}")
-    confirm_event = WSEvent(
+    """Delete the Redis typing key and broadcast typing.stop to the room."""
+    logger.info(f"typing.stop from user {user_id} in room {event.room_id}")
+
+    user_repo = UserRepository(db)
+    user_dict = await user_repo.find_by_id(user_id)
+    username = user_dict.get("username", user_id) if user_dict else user_id
+
+    await delete_key(f"typing:{event.room_id}:{user_id}")
+
+    broadcast_event = WSEvent(
         event=WSEventType.TYPING_STOP,
-        payload={"user_id": user_id, "status": "typing_stopped_confirm"},
+        payload={"user_id": user_id, "username": username},
         room_id=event.room_id
     )
-    await websocket.send_json(confirm_event.model_dump(mode="json"))
+    await manager.broadcast_to_room_except(
+        broadcast_event.model_dump(mode="json"), event.room_id, exclude_user_id=user_id
+    )
 
 
 async def handle_message_read(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
@@ -204,18 +236,30 @@ async def websocket_endpoint(
     # Accept and register connection
     await manager.connect(websocket, room_id, user_id)
 
-    # Store user as online in Redis
-    await set_value(f"user:{user_id}:status", "online")
+    # Store user as online in Redis with TTL — will auto-expire if keepalive stops
+    await set_with_expiry(f"user:{user_id}:status", "online", PRESENCE_TTL)
     await add_to_set("online_users", user_id)
     await add_to_set(f"room:{room_id}:online", user_id)
 
     # Broadcast presence.join to the room (except the joining user)
     join_event = WSEvent(
         event=WSEventType.PRESENCE_JOIN,
-        payload={"user_id": user_id},
+        payload={"user_id": user_id, "username": current_user.username},
         room_id=room_id
     )
     await manager.broadcast_to_room_except(join_event.model_dump(mode="json"), room_id, exclude_user_id=user_id)
+
+    # ── Keepalive task: refreshes presence TTL every KEEPALIVE_INTERVAL seconds ──
+    async def _keepalive():
+        try:
+            while True:
+                await asyncio.sleep(KEEPALIVE_INTERVAL)
+                await refresh_expiry(f"user:{user_id}:status", PRESENCE_TTL)
+                logger.debug(f"Keepalive refreshed for user {user_id} in room {room_id}")
+        except asyncio.CancelledError:
+            pass  # Normal cancellation on disconnect
+
+    keepalive_task = asyncio.create_task(_keepalive())
 
     try:
         while True:
@@ -276,35 +320,38 @@ async def websocket_endpoint(
     except Exception as e:
         logger.error(f"WebSocket error for user {user_id} in room {room_id}: {e}", exc_info=True)
     finally:
+        # Stop the keepalive heartbeat
+        keepalive_task.cancel()
         # Clean up connection manager registry
         manager.disconnect(websocket, room_id, user_id)
 
         # Check remaining connections for user in this room
-        room_connections = 0
-        if room_id in manager.active_connections:
-            for u_id, ws in manager.active_connections[room_id]:
-                if u_id == user_id:
-                    room_connections += 1
+        room_connections = sum(
+            1 for u_id, _ in manager.active_connections.get(room_id, []) if u_id == user_id
+        )
 
         # Check remaining connections for user globally
-        global_connections = 0
-        for r_id, conn_list in manager.active_connections.items():
-            for u_id, ws in conn_list:
-                if u_id == user_id:
-                    global_connections += 1
-
-        import asyncio
+        global_connections = sum(
+            1
+            for conn_list in manager.active_connections.values()
+            for u_id, _ in conn_list
+            if u_id == user_id
+        )
 
         async def perform_redis_cleanup():
+            # Clear any stale typing indicator for this user in this room
+            await delete_key(f"typing:{room_id}:{user_id}")
             # If no connections left in the room, remove from room online set and broadcast leave
             if room_connections == 0:
                 await remove_from_set(f"room:{room_id}:online", user_id)
                 leave_event = WSEvent(
                     event=WSEventType.PRESENCE_LEAVE,
-                    payload={"user_id": user_id},
+                    payload={"user_id": user_id, "username": current_user.username},
                     room_id=room_id
                 )
-                await manager.broadcast_to_room_except(leave_event.model_dump(mode="json"), room_id, exclude_user_id=user_id)
+                await manager.broadcast_to_room_except(
+                    leave_event.model_dump(mode="json"), room_id, exclude_user_id=user_id
+                )
 
             # If no connections left globally, mark status offline
             if global_connections == 0:
