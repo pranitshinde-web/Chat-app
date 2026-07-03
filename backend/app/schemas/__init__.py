@@ -3,7 +3,7 @@ from app.schemas.auth import Token, AuthResponse
 from app.schemas.common import ErrorResponse, HTTPValidationError
 from app.schemas.room import RoomCreate, RoomUpdate, RoomResponse
 from app.schemas.websocket import WSEvent, WSEventType
-from app.schemas.message import MessageCreate, MessageResponse
+from app.schemas.message import MessageCreate, MessageResponse, ReactionRequest
 from app.schemas.notification import NotificationResponse, NotificationListResponse
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "WSEventType",
     "MessageCreate",
     "MessageResponse",
+    "ReactionRequest",
     "NotificationResponse",
     "NotificationListResponse",
 ]

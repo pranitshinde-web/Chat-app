@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import Field, model_validator
 from enum import Enum
 
@@ -17,6 +17,7 @@ class Message(BaseDocument):
     content: Optional[str] = Field(None, max_length=5000)
     message_type: MessageType = Field(default=MessageType.TEXT)
     file_url: Optional[str] = None
+    reactions: Dict[str, List[PyObjectId]] = Field(default_factory=dict)
     read_by: List[PyObjectId] = Field(default_factory=list)
     is_deleted: bool = Field(default=False)
 

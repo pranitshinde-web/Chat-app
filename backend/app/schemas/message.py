@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Dict, List, Optional
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from datetime import datetime
 
@@ -21,6 +21,9 @@ class MessageUpdate(BaseModel):
     content: str = Field(..., min_length=1, max_length=5000)
 
 
+class ReactionRequest(BaseModel):
+    emoji: str = Field(..., min_length=1, max_length=10)
+
 class MessageResponse(BaseModel):
     id: PyObjectId = Field(alias="_id")
     room_id: PyObjectId
@@ -28,6 +31,7 @@ class MessageResponse(BaseModel):
     content: Optional[str] = None
     message_type: MessageType
     file_url: Optional[str] = None
+    reactions: Dict[str, List[PyObjectId]] = Field(default_factory=dict)
     read_by: List[PyObjectId]
     is_deleted: bool
     created_at: datetime
@@ -38,6 +42,7 @@ class MessageResponse(BaseModel):
         if self.is_deleted:
             self.content = "[message deleted]"
             self.file_url = None
+            self.reactions = {}
         return self
 
     model_config = ConfigDict(
