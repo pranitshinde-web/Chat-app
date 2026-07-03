@@ -16,8 +16,12 @@ from app.core.redis_client import (
     add_to_set, remove_from_set, refresh_expiry,
 )
 from app.models.message import Message, MessageType
+from app.models.notification import NotificationType
 from app.services.message_repository import MessageRepository
+from app.services.notification_repository import NotificationRepository
 from app.schemas.message import MessageResponse
+from app.schemas.notification import NotificationResponse
+from app.core.redis_client import get_set_members
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["WebSockets"])
@@ -111,7 +115,16 @@ async def handle_message_send(event: WSEvent, user_id: str, websocket: WebSocket
     )
     await manager.broadcast_to_room(new_event.model_dump(mode="json"), event.room_id)
 
-    # 4. Return message.sent acknowledgement to sender
+    # 4. Generate new_message notifications for offline room members
+    await _notify_offline_members(
+        db=db,
+        room=room,
+        sender_id=user_id,
+        room_id=event.room_id,
+        message_id=inserted_id,
+    )
+
+    # 5. Return message.sent acknowledgement to sender
     sent_event = WSEvent(
         event=WSEventType.MESSAGE_SENT,
         payload={
@@ -121,6 +134,48 @@ async def handle_message_send(event: WSEvent, user_id: str, websocket: WebSocket
         room_id=event.room_id
     )
     await websocket.send_json(sent_event.model_dump(mode="json"))
+
+
+async def _notify_offline_members(
+    db: AsyncIOMotorDatabase,
+    room: dict,
+    sender_id: str,
+    room_id: str,
+    message_id: str,
+) -> None:
+    """
+    For each room member who is currently offline (not in the Redis
+    room:<room_id>:online set), insert a new_message notification.
+    The sender is always excluded.
+    """
+    try:
+        online_user_ids: set = await get_set_members(f"room:{room_id}:online")
+        all_member_oids = room.get("members", [])
+
+        notification_repo = NotificationRepository(db)
+        docs_to_insert = []
+        for member_oid in all_member_oids:
+            member_id_str = str(member_oid)
+            # Skip sender and anyone currently online in this room
+            if member_id_str == sender_id or member_id_str in online_user_ids:
+                continue
+            docs_to_insert.append({
+                "user_id": member_oid,
+                "type": NotificationType.NEW_MESSAGE.value,
+                "room_id": ObjectId(room_id),
+                "message_id": ObjectId(message_id),
+                "is_read": False,
+            })
+
+        if docs_to_insert:
+            await notification_repo.insert_many(docs_to_insert)
+            logger.debug(
+                f"Inserted {len(docs_to_insert)} offline notification(s) "
+                f"for message {message_id} in room {room_id}"
+            )
+    except Exception as exc:
+        # Notifications are best-effort — never fail the message send
+        logger.error(f"Failed to insert offline notifications: {exc}", exc_info=True)
 
 
 async def handle_typing_start(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
@@ -287,6 +342,27 @@ async def websocket_endpoint(
     await set_with_expiry(f"user:{user_id}:status", "online", PRESENCE_TTL)
     await add_to_set("online_users", user_id)
     await add_to_set(f"room:{room_id}:online", user_id)
+
+    # Push any pending (unread) notifications to the user immediately on connect
+    try:
+        notif_repo = NotificationRepository(db)
+        unread_docs = await notif_repo.find_unread_for_user(user_id)
+        if unread_docs:
+            pending_payload = [
+                NotificationResponse(**doc).model_dump(mode="json")
+                for doc in unread_docs
+            ]
+            pending_event = WSEvent(
+                event=WSEventType.NOTIFICATIONS_PENDING,
+                payload={"notifications": pending_payload, "unread_count": len(pending_payload)},
+                room_id=room_id,
+            )
+            await websocket.send_json(pending_event.model_dump(mode="json"))
+            logger.info(
+                f"Pushed {len(unread_docs)} pending notification(s) to user {user_id}"
+            )
+    except Exception as exc:
+        logger.error(f"Failed to push pending notifications on connect: {exc}", exc_info=True)
 
     # Broadcast presence.join to the room (except the joining user)
     join_event = WSEvent(

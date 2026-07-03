@@ -17,6 +17,7 @@ class WSEventType(str, Enum):
     MESSAGE_READ = "message.read"
     MESSAGE_READ_RECEIPT = "message.read_receipt"
     ROOM_READ_ALL = "room.read_all"
+    NOTIFICATIONS_PENDING = "notifications.pending"
     ERROR = "error"
 
 

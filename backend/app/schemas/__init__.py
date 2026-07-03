@@ -4,6 +4,7 @@ from app.schemas.common import ErrorResponse, HTTPValidationError
 from app.schemas.room import RoomCreate, RoomUpdate, RoomResponse
 from app.schemas.websocket import WSEvent, WSEventType
 from app.schemas.message import MessageCreate, MessageResponse
+from app.schemas.notification import NotificationResponse, NotificationListResponse
 
 __all__ = [
     "UserCreate",
@@ -21,5 +22,7 @@ __all__ = [
     "WSEventType",
     "MessageCreate",
     "MessageResponse",
+    "NotificationResponse",
+    "NotificationListResponse",
 ]
 
