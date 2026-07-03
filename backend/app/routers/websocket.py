@@ -167,13 +167,60 @@ async def handle_typing_stop(event: WSEvent, user_id: str, websocket: WebSocket,
 
 
 async def handle_message_read(event: WSEvent, user_id: str, websocket: WebSocket, db: AsyncIOMotorDatabase):
-    logger.info(f"Routing to handle_message_read for user {user_id} in room {event.room_id}")
-    confirm_event = WSEvent(
-        event=WSEventType.MESSAGE_READ,
-        payload={"message_id": event.payload.get("message_id"), "user_id": user_id, "status": "read_confirm"},
-        room_id=event.room_id
+    """
+    Mark a message as read by the current user via $addToSet (idempotent),
+    then broadcast the updated read_by list to the whole room.
+    """
+    logger.info(f"message.read from user {user_id} in room {event.room_id}")
+
+    message_id = event.payload.get("message_id")
+    if not message_id or not ObjectId.is_valid(message_id):
+        error_event = WSEvent(
+            event=WSEventType.ERROR,
+            payload={"detail": "message.read requires a valid message_id in payload."},
+            room_id=event.room_id,
+        )
+        await websocket.send_json(error_event.model_dump(mode="json"))
+        return
+
+    msg_repo = MessageRepository(db)
+    message = await msg_repo.find_by_id(message_id)
+    if not message:
+        error_event = WSEvent(
+            event=WSEventType.ERROR,
+            payload={"detail": f"Message {message_id} not found."},
+            room_id=event.room_id,
+        )
+        await websocket.send_json(error_event.model_dump(mode="json"))
+        return
+
+    # Atomically add user to read_by — $addToSet guarantees no duplicates
+    user_oid = ObjectId(user_id)
+    updated_doc = await msg_repo.update_one(
+        {"_id": ObjectId(message_id)},
+        {
+            "$addToSet": {"read_by": user_oid},
+            "$set": {},  # triggers updated_at injection in BaseRepository
+        },
+        return_document=True,
     )
-    await websocket.send_json(confirm_event.model_dump(mode="json"))
+
+    if not updated_doc:
+        # Fallback: fetch the document as-is (already up-to-date from a race)
+        updated_doc = message
+
+    # Broadcast read_receipt with the fresh read_by list
+    read_by_strs = [str(uid) for uid in updated_doc.get("read_by", [])]
+    receipt_event = WSEvent(
+        event=WSEventType.MESSAGE_READ_RECEIPT,
+        payload={
+            "message_id": message_id,
+            "read_by": read_by_strs,
+            "reader_id": user_id,
+        },
+        room_id=event.room_id,
+    )
+    await manager.broadcast_to_room(receipt_event.model_dump(mode="json"), event.room_id)
 
 
 # Dispatcher map for client-initiated events

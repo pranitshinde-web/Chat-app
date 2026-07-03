@@ -15,6 +15,8 @@ class WSEventType(str, Enum):
     PRESENCE_JOIN = "presence.join"
     PRESENCE_LEAVE = "presence.leave"
     MESSAGE_READ = "message.read"
+    MESSAGE_READ_RECEIPT = "message.read_receipt"
+    ROOM_READ_ALL = "room.read_all"
     ERROR = "error"
 
 

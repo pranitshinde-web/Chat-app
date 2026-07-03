@@ -311,3 +311,82 @@ async def get_room_messages(
     )
     
     return [MessageResponse(**msg) for msg in messages]
+
+
+@router.post(
+    "/{room_id}/messages/read",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Bulk mark all room messages as read"
+)
+async def mark_room_messages_read(
+    room_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncIOMotorDatabase = Depends(get_database)
+):
+    """
+    Marks all non-deleted messages in the room as read by the current user
+    using a single bulk $addToSet operation.
+    Broadcasts a room.read_all WebSocket event so connected clients can
+    immediately clear unread indicators for this user.
+    Only accessible to room members.
+    """
+    if not ObjectId.is_valid(room_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid room ID format."
+        )
+
+    room_repo = RoomRepository(db)
+    room = await room_repo.find_by_id(room_id)
+    if not room:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Room not found."
+        )
+
+    user_oid = ObjectId(current_user.id)
+    if user_oid not in room.get("members", []):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You are not a member of this room."
+        )
+
+    msg_repo = MessageRepository(db)
+
+    # Single bulk operation: add user to read_by for every non-deleted message
+    # in the room where they are not already listed.
+    # $addToSet is a no-op per document where user_oid is already present.
+    modified_count = await msg_repo.update_many(
+        filter={
+            "room_id": ObjectId(room_id),
+            "is_deleted": {"$ne": True},
+            "read_by": {"$ne": user_oid},
+        },
+        update={
+            "$addToSet": {"read_by": user_oid},
+            "$set": {},   # triggers updated_at injection in BaseRepository
+        },
+    )
+
+    logger.info(
+        f"Bulk read: user {current_user.id} marked {modified_count} messages "
+        f"as read in room {room_id}"
+    )
+
+    # Broadcast room.read_all so all connected members can update their UI
+    from app.services.connection_manager import manager
+    from app.schemas.websocket import WSEvent, WSEventType
+
+    read_all_event = WSEvent(
+        event=WSEventType.ROOM_READ_ALL,
+        payload={
+            "user_id": str(current_user.id),
+            "username": current_user.username,
+            "messages_marked": modified_count,
+        },
+        room_id=room_id,
+    )
+    await manager.broadcast_to_room(read_all_event.model_dump(mode="json"), room_id)
+
+    # 204 No Content — nothing to return
+    return None
